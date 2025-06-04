@@ -1,0 +1,15 @@
+# Exclude VHDL dataset files
+vhdl_dataset.xlsx
+vhld_from_xlsx_data
+.venv
+check_vhdl
+count
+flash2.5_verilog
+hdl_coder\100
+verilog-eval
+vhdllint
+
+# Build artifacts and object files
+*.o
+*.cf
+work-obj*.cf
