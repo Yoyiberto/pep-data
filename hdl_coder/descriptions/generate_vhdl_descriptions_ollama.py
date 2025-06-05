@@ -1,15 +1,8 @@
 import os
-import google.generativeai as genai
-from dotenv import load_dotenv
 import json
+import requests
 
 # --- Configuration ---
-# Assumes the .env file is in a directory named 'flash2.5_verilog' at the same level as this script's parent directory
-# Adjust an_env_file_path if your .env file is located elsewhere.
-# For example, if .env is in the same directory as this script, set: an_env_file_path = ".env"
-# If .env is in the parent directory, set: an_env_file_path = "../.env"
-ENV_FILE_PATH = "../../flash2.5_verilog/.env" # Path to .env file, relative to this script file
-
 BASE_PROMPT_FILE = "hdl_coder/descriptions/prompt.txt"
 VHD_FILES_RELATIVE_TO_WORKSPACE = [
     "hdl_coder/descriptions/hdlcoder_row2.vhd",
@@ -17,23 +10,18 @@ VHD_FILES_RELATIVE_TO_WORKSPACE = [
     "hdl_coder/descriptions/hdlcoder_row13.vhd",
 ]
 OUTPUT_DIR_RELATIVE_TO_WORKSPACE = "hdl_coder/descriptions/out"
-#GEMINI_API_MODEL = "gemini-2.5-flash-preview-05-20" # Using 1.5 flash as 2.5 is not a valid model name
-GEMINI_API_MODEL = "gemini-2.0-flash-lite" # Using 1.5 flash as 2.5 is not a valid model name
 
-# Safety settings for the Gemini API call
-GENERATION_CONFIG = {
+# Ollama Configuration
+OLLAMA_BASE_URL = "http://localhost:11434"  # Default Ollama URL
+OLLAMA_MODEL = "llama3:latest"  # You can change this to any model you have installed
+# Available models: "mistral:latest", "python-expert:latest", "llama3:latest"
+
+OLLAMA_OPTIONS = {
     "temperature": 0.7,
-    "top_p": 1,
-    "top_k": 1,
-    "max_output_tokens": 8192,
+    "top_p": 1.0,
+    "top_k": 40,
+    "num_predict": 8192,  # Maximum tokens to generate
 }
-
-SAFETY_SETTINGS = [
-    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-]
 
 # --- Helper Functions ---
 def get_absolute_path(relative_to_workspace_path):
@@ -43,22 +31,6 @@ def get_absolute_path(relative_to_workspace_path):
     # (Data/hdl_coder/descriptions/ -> Data/)
     workspace_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
     return os.path.join(workspace_root, relative_to_workspace_path)
-
-def load_api_key(env_path_relative_to_script):
-    """Loads the Google API key from the specified .env file, path relative to this script."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    absolute_env_path = os.path.abspath(os.path.join(script_dir, env_path_relative_to_script))
-
-    if not os.path.exists(absolute_env_path):
-        print(f"Error: API key file not found at {absolute_env_path}")
-        print(f"Script directory: {script_dir}")
-        print(f"Relative path used for .env: {env_path_relative_to_script}")
-        return None
-    load_dotenv(dotenv_path=absolute_env_path)
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        print(f"Error: GOOGLE_API_KEY not found in {absolute_env_path}")
-    return api_key
 
 def read_file_content(file_path):
     """Reads the entire content of a file."""
@@ -72,22 +44,37 @@ def read_file_content(file_path):
         print(f"Error reading file {get_absolute_path(file_path)}: {e}")
         return None
 
-def call_gemini_api(api_key, prompt_text):
-    """Calls the Gemini API with the given prompt and returns the JSON response."""
-    if not api_key:
-        print("API key not loaded. Cannot call Gemini API.")
-        return None
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(
-        model_name=GEMINI_API_MODEL,
-        generation_config=GENERATION_CONFIG,
-        safety_settings=SAFETY_SETTINGS,
-    )
+def call_ollama_api(prompt_text):
+    """Calls the Ollama API with the given prompt and returns the JSON response."""
     try:
-        print(f"Sending request to Gemini API with model {GEMINI_API_MODEL}...")
-        response = model.generate_content([prompt_text])
-        response_text = response.text
+        print(f"Sending request to Ollama API with model {OLLAMA_MODEL}...")
+        
+        # Prepare the request payload
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt_text,
+            "stream": False,
+            "options": OLLAMA_OPTIONS
+        }
+        
+        # Make the API call
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json=payload,
+            timeout=300  # 5 minutes timeout
+        )
+        
+        if response.status_code != 200:
+            print(f"Error: Ollama API returned status code {response.status_code}")
+            print(f"Response: {response.text}")
+            return None
+            
+        response_data = response.json()
+        response_text = response_data.get("response", "")
+        
+        if not response_text:
+            print("Error: Empty response from Ollama API")
+            return None
 
         # Attempt to find and parse JSON block
         json_start_index = response_text.find('{')
@@ -124,9 +111,46 @@ def call_gemini_api(api_key, prompt_text):
             print(f"Full response: {response_text}")
             return None
 
-    except Exception as e:
-        print(f"Error calling Gemini API: {e}")
+    except requests.exceptions.ConnectionError:
+        print(f"Error: Could not connect to Ollama at {OLLAMA_BASE_URL}")
+        print("Make sure Ollama is running locally. You can start it with: ollama serve")
         return None
+    except requests.exceptions.Timeout:
+        print("Error: Request to Ollama API timed out")
+        return None
+    except Exception as e:
+        print(f"Error calling Ollama API: {e}")
+        return None
+
+def check_ollama_connection():
+    """Check if Ollama is running and the model is available."""
+    try:
+        # Check if Ollama is running
+        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        if response.status_code != 200:
+            print(f"Error: Could not connect to Ollama at {OLLAMA_BASE_URL}")
+            return False
+            
+        # Check if the specified model is available
+        models = response.json().get("models", [])
+        model_names = [model["name"] for model in models]
+        
+        if not any(OLLAMA_MODEL in name for name in model_names):
+            print(f"Error: Model '{OLLAMA_MODEL}' not found in Ollama")
+            print(f"Available models: {model_names}")
+            print(f"You can install the model with: ollama pull {OLLAMA_MODEL}")
+            return False
+            
+        print(f"Successfully connected to Ollama. Using model: {OLLAMA_MODEL}")
+        return True
+        
+    except requests.exceptions.ConnectionError:
+        print(f"Error: Could not connect to Ollama at {OLLAMA_BASE_URL}")
+        print("Make sure Ollama is running locally. You can start it with: ollama serve")
+        return False
+    except Exception as e:
+        print(f"Error checking Ollama connection: {e}")
+        return False
 
 def write_output(file_path, data):
     """Writes data to a file, creating directories if they don't exist."""
@@ -144,18 +168,16 @@ def write_output(file_path, data):
 
 # --- Main Script ---
 def main():
-    print("Starting VHDL description generation script...")
+    print("Starting VHDL description generation script with Ollama...")
     script_dir = os.path.dirname(os.path.abspath(__file__))
     workspace_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
     print(f"Script location: {script_dir}")
     print(f"Determined workspace root: {workspace_root}")
     print(f"Current working directory: {os.getcwd()}")
 
-    # ENV_FILE_PATH is now relative to the script file itself.
-    # load_api_key function handles resolving this.
-    api_key = load_api_key(ENV_FILE_PATH)
-    if not api_key:
-        print("Exiting due to API key loading failure.")
+    # Check Ollama connection and model availability
+    if not check_ollama_connection():
+        print("Exiting due to Ollama connection failure.")
         return
 
     base_prompt_content = read_file_content(BASE_PROMPT_FILE)
@@ -170,37 +192,35 @@ def main():
         print(f"Created output directory: {abs_output_dir}")
 
     for vhd_file_relative_path in VHD_FILES_RELATIVE_TO_WORKSPACE:
-        print(f"\\nProcessing VHD file: {vhd_file_relative_path}...")
+        print(f"\nProcessing VHD file: {vhd_file_relative_path}...")
         vhd_content = read_file_content(vhd_file_relative_path)
         if not vhd_content:
             print(f"Skipping {vhd_file_relative_path} due to read error.")
             continue
 
-        # Construct the full prompt
-        full_prompt = base_prompt_content + "\\n\\n```vhdl\\n" + vhd_content + "\\n```"
-        # print(f"\\n--- Combined Prompt for {vhd_file_relative_path} ---")
-        # print(full_prompt[:500] + "..." if len(full_prompt) > 500 else full_prompt) # Print a snippet
-        # print("--- End of Combined Prompt Snippet ---")
+        # Construct the full prompt with explicit JSON requirement
+        full_prompt = (base_prompt_content + "\n\n```vhdl\n" + vhd_content + "\n```\n\n" +
+                      "IMPORTANT: You must respond with ONLY a valid JSON object. Do not include any explanatory text before or after the JSON. " +
+                      "Start your response with { and end with }.")
 
-
-        api_response_json = call_gemini_api(api_key, full_prompt)
+        api_response_json = call_ollama_api(full_prompt)
 
         if api_response_json:
             # Determine output file name
             base_vhd_filename = os.path.basename(vhd_file_relative_path) # e.g., hdlcoder_row2.vhd
-            # Replace "hdlcoder_" with "hdlcoder_dscpt_" and ".vhd" with ".txt"
+            # Replace "hdlcoder_" with "hdlcoder_dscpt_ollama_" and ".vhd" with ".txt"
             if base_vhd_filename.startswith("hdlcoder_") and base_vhd_filename.endswith(".vhd"):
-                output_filename_base = "hdlcoder_dscpt_" + base_vhd_filename[len("hdlcoder_"):-len(".vhd")]
+                output_filename_base = "hdlcoder_dscpt_ollama_" + base_vhd_filename[len("hdlcoder_"):-len(".vhd")]
                 output_filename = output_filename_base + ".txt"
             else: # Fallback for unexpected filenames
-                output_filename = os.path.splitext(base_vhd_filename)[0] + "_dscpt.txt"
+                output_filename = os.path.splitext(base_vhd_filename)[0] + "_dscpt_ollama.txt"
 
             output_file_path = os.path.join(OUTPUT_DIR_RELATIVE_TO_WORKSPACE, output_filename)
             write_output(output_file_path, api_response_json)
         else:
-            print(f"Failed to get a valid response from API for {vhd_file_relative_path}. Skipping output.")
+            print(f"Failed to get a valid response from Ollama API for {vhd_file_relative_path}. Skipping output.")
 
-    print("\\nScript finished.")
+    print("\nScript finished.")
 
 if __name__ == "__main__":
     main() 
