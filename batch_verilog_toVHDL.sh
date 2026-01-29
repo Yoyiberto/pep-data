@@ -1,5 +1,5 @@
 INPUT_DIR="D:/Proyectos/EMINENT_D/2025-01/PEP/Data/verilog-eval/dataset_code-complete-iccad2023"
-OUTPUT_DIR="${INPUT_DIR}/VHDL"
+OUTPUT_DIR="${INPUT_DIR}/VHDL_2"
 
 # Create the output directory if it doesn't exist
 mkdir -p "${OUTPUT_DIR}"
